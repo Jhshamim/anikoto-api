@@ -5,7 +5,12 @@ import * as cheerio from 'cheerio'
 // Clean, verified Hono worker application for Cloudflare
 const app = new Hono()
 
-app.use('*', cors())
+app.use('*', cors({
+  origin: '*',
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowHeaders: ['*'],
+  exposeHeaders: ['*'],
+}))
 
 // Welcome and API usage documentation route
 app.get("/", (c) => {
