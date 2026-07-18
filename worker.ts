@@ -153,11 +153,13 @@ function mapServerName(name: string): string {
 async function resolveAnime(queryId: string) {
   let searchQueries: string[] = [queryId];
   let isAnilistId = /^\d+$/.test(queryId);
+  let debug: any = { isAnilistId, queryId };
 
   if (isAnilistId) {
     try {
       const q = `query($id:Int){Media(id:$id,type:ANIME){title{romaji english}}}`;
-      const gqResp = await fetch("https://graphql.anilist.co", {
+      debug.graphqlQuery = q;
+      let gqResp = await fetch("https://graphql.anilist.co", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -166,45 +168,90 @@ async function resolveAnime(queryId: string) {
         },
         body: JSON.stringify({ query: q, variables: { id: parseInt(queryId, 10) } })
       });
+      debug.status = gqResp.status;
+      debug.statusText = gqResp.statusText;
+      
       if (!gqResp.ok) {
         const errText = await gqResp.text();
         console.error(`AniList GraphQL HTTP error ${gqResp.status}:`, errText);
-        throw new Error(`HTTP ${gqResp.status}`);
+        debug.errorText = errText;
+        throw new Error(`HTTP ${gqResp.status}: ${errText}`);
       }
       const gqData = await gqResp.json() as any;
+      debug.responseJson = gqData;
       const titles = gqData.data?.Media?.title;
       searchQueries = [];
       if (titles?.english) searchQueries.push(titles.english);
       if (titles?.romaji) searchQueries.push(titles.romaji);
       if (searchQueries.length === 0) searchQueries.push(queryId);
     } catch(e: any) {
-      console.error("Anilist lookup failed:", e.message || e);
+      console.error("Anilist lookup first attempt failed, retrying with neutral headers:", e.message || e);
+      debug.firstAttemptException = e.message || String(e);
+      try {
+        const q = `query($id:Int){Media(id:$id,type:ANIME){title{romaji english}}}`;
+        const gqResp2 = await fetch("https://graphql.anilist.co", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ query: q, variables: { id: parseInt(queryId, 10) } })
+        });
+        debug.secondAttemptStatus = gqResp2.status;
+        if (!gqResp2.ok) {
+          const errText2 = await gqResp2.text();
+          debug.secondAttemptErrorText = errText2;
+          throw new Error(`HTTP ${gqResp2.status}: ${errText2}`);
+        }
+        const gqData2 = await gqResp2.json() as any;
+        debug.secondAttemptResponseJson = gqData2;
+        const titles = gqData2.data?.Media?.title;
+        searchQueries = [];
+        if (titles?.english) searchQueries.push(titles.english);
+        if (titles?.romaji) searchQueries.push(titles.romaji);
+        if (searchQueries.length === 0) searchQueries.push(queryId);
+      } catch (e2: any) {
+        console.error("Anilist lookup second attempt failed too:", e2.message || e2);
+        debug.exception = e2.message || String(e2);
+      }
     }
   }
 
+  debug.searchQueries = searchQueries;
   let matchedAnime: any = null;
 
   for (const sq of searchQueries) {
     const url = new URL("https://anikoto.cz/filter");
     url.searchParams.append("keyword", sq);
-    const resp = await fetch(url.toString(), { headers: HEADERS });
-    const text = await resp.text();
-    const results = extractAnimeList(text);
-    if (results.length > 0) {
-      const lowerSq = sq.toLowerCase();
-      matchedAnime = results.find(r => r.title.toLowerCase() === lowerSq);
-      if (matchedAnime) break;
+    try {
+      const resp = await fetch(url.toString(), { headers: HEADERS });
+      const text = await resp.text();
+      const results = extractAnimeList(text);
+      if (results.length > 0) {
+        const lowerSq = sq.toLowerCase();
+        matchedAnime = results.find(r => r.title.toLowerCase() === lowerSq);
+        if (matchedAnime) {
+          debug.matchedViaExact = sq;
+          break;
+        }
+      }
+    } catch (e: any) {
+      debug[`searchError_${sq}`] = e.message || String(e);
     }
   }
 
   if (!matchedAnime) {
     const url = new URL("https://anikoto.cz/filter");
     url.searchParams.append("keyword", searchQueries[0]);
-    const resp = await fetch(url.toString(), { headers: HEADERS });
-    const text = await resp.text();
-    const results = extractAnimeList(text);
-    if (results.length > 0) {
-      matchedAnime = results[0];
+    try {
+      const resp = await fetch(url.toString(), { headers: HEADERS });
+      const text = await resp.text();
+      const results = extractAnimeList(text);
+      if (results.length > 0) {
+        matchedAnime = results[0];
+        debug.matchedViaFallbackFirst = results[0].title;
+      }
+    } catch (e: any) {
+      debug.fallbackSearchError = e.message || String(e);
     }
   }
 
@@ -215,9 +262,10 @@ async function resolveAnime(queryId: string) {
       id: queryId,
       title: queryId.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
     };
+    debug.matchedViaSlugFallback = true;
   }
 
-  return matchedAnime;
+  return { matchedAnime, debug };
 }
 
 app.get("/api/search", async (c) => {
@@ -244,10 +292,10 @@ app.get("/api/episodes", async (c) => {
   }
 
   try {
-    const matchedAnime = await resolveAnime(queryId);
+    const { matchedAnime, debug } = await resolveAnime(queryId);
 
     if (!matchedAnime) {
-      return c.json({ success: false, error: "Anime not found on anikoto.cz" }, 404);
+      return c.json({ success: false, error: "Anime not found on anikoto.cz", _debug: debug }, 404);
     }
 
     const animeId = matchedAnime.id;
@@ -260,7 +308,7 @@ app.get("/api/episodes", async (c) => {
         isDub: e.isDub,
         isFiller: e.isFiller
     }));
-    return c.json({ success: true, animeTitle: matchedAnime.title, animeId: animeId, data: formattedEpisodes });
+    return c.json({ success: true, animeTitle: matchedAnime.title, animeId: animeId, data: formattedEpisodes, _debug: debug });
   } catch (e: any) {
     return c.json({ success: false, error: "Failed to scrape episodes", details: e.message }, 500);
   }
@@ -273,7 +321,7 @@ app.get("/api/servers", async (c) => {
     return c.json({ error: "Missing id or ep parameter" }, 400);
   }
   try {
-    const matchedAnime = await resolveAnime(queryId);
+    const { matchedAnime } = await resolveAnime(queryId);
     if (!matchedAnime) {
       return c.json({ success: false, error: "Anime not found on anikoto.cz" }, 404);
     }
@@ -325,7 +373,7 @@ app.get("/api/stream", async (c) => {
     return c.json({ error: "Missing required query parameters" }, 400);
   }
   try {
-    const matchedAnime = await resolveAnime(queryId);
+    const { matchedAnime } = await resolveAnime(queryId);
     if (!matchedAnime) {
       return c.json({ success: false, error: "Anime not found on anikoto.cz" }, 404);
     }
