@@ -9,7 +9,11 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(cors());
+  app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['*']
+  }));
   app.use(express.json());
 
   const ajaxClient = axios.create({
@@ -127,17 +131,30 @@ async function startServer() {
     let isAnilistId = /^\d+$/.test(queryId);
 
     if (isAnilistId) {
+      searchQueries = [];
       try {
-        const q = `query($id:Int){Media(id:$id,type:ANIME){title{romaji english}}}`;
-        const gqResp = await axios.post("https://graphql.anilist.co", { query: q, variables: { id: parseInt(queryId, 10) } });
-        const titles = gqResp.data?.data?.Media?.title;
-        searchQueries = [];
-        if (titles?.english) searchQueries.push(titles.english);
-        if (titles?.romaji) searchQueries.push(titles.romaji);
-        if (searchQueries.length === 0) searchQueries.push(queryId);
+        const kitsuResp = await axios.get(`https://kitsu.io/api/edge/mappings?filter[externalSite]=anilist/anime&filter[externalId]=${queryId}&include=item`, { validateStatus: () => true });
+        if (kitsuResp.status === 200 && kitsuResp.data?.included?.length > 0) {
+          const attributes = kitsuResp.data.included[0].attributes;
+          const titles = attributes.titles;
+          if (titles?.en) searchQueries.push(titles.en);
+          if (titles?.en_jp) searchQueries.push(titles.en_jp);
+          if (attributes?.canonicalTitle && !searchQueries.includes(attributes.canonicalTitle)) {
+            searchQueries.push(attributes.canonicalTitle);
+          }
+        }
+
+        if (searchQueries.length === 0) {
+          const jikanResp = await axios.get(`https://api.jikan.moe/v4/anime/${queryId}`, { validateStatus: () => true });
+          if (jikanResp.status === 200 && jikanResp.data?.data) {
+             if (jikanResp.data.data.title_english) searchQueries.push(jikanResp.data.data.title_english);
+             if (jikanResp.data.data.title) searchQueries.push(jikanResp.data.data.title);
+          }
+        }
       } catch(e) {
-        console.error("Anilist lookup failed", e);
+        console.error("Anime ID lookup failed", e);
       }
+      if (searchQueries.length === 0) searchQueries.push(queryId);
     }
 
     let matchedAnime: any = null;
