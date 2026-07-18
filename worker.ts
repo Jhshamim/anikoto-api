@@ -1,7 +1,8 @@
-himport { Hono } from 'hono'
+import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import * as cheerio from 'cheerio'
 
+// Clean, verified Hono worker application for Cloudflare
 const app = new Hono()
 
 app.use('*', cors())
